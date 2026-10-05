@@ -140,8 +140,9 @@ export const DEFAULT_MAS_SORA_DATA: SoraRateRecord[] = [
 ];
 
 /**
- * Fetch latest SORA data directly from MAS API (with safe fallback).
- * MAS Endpoint: Singapore Overnight Rate Average historical statistics
+ * Fetch latest SORA data via serverless /api/sora endpoint (with direct API and safe fallback).
+ * Uses the MAS API-Gateway endpoint:
+ * https://eservices.mas.gov.sg/apimg-gw/server/monthly_statistical_bulletin_non610mssql/domestic_interest_rates_daily/views/domestic_interest_rates_daily
  */
 export async function fetchMasSoraRates(): Promise<{
   data: SoraRateRecord[];
@@ -149,7 +150,48 @@ export async function fetchMasSoraRates(): Promise<{
   sourceText: string;
   lastUpdated: string;
 }> {
-  const masApiUrl = 'https://eservices.mas.gov.sg/api/action/datastore/search.json?resource_id=9a0bf149-308d-4bd2-832d-76c8e6cad4be&limit=15&sort=end_of_day%20desc';
+  // 1. Try serverless /api/sora connection
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const serverlessResponse = await fetch('/api/sora?limit=20&sort=end_of_day%20desc', {
+      signal: controller.signal,
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    clearTimeout(timeoutId);
+
+    if (serverlessResponse.ok) {
+      const json = await serverlessResponse.json();
+      if (Array.isArray(json?.records) && json.records.length > 0) {
+        return {
+          data: json.records,
+          isLive: true,
+          sourceText: 'MAS API-Gateway Live Stream (KeyId Authenticated)',
+          lastUpdated: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit' }),
+        };
+      }
+    } else {
+      const errJson = await serverlessResponse.json().catch(() => null);
+      if (errJson?.code === 'MISSING_MAS_KEY_ID') {
+        return {
+          data: DEFAULT_MAS_SORA_DATA,
+          isLive: false,
+          sourceText: 'Serverless Endpoint Ready (/api/sora, Awaiting MAS_KEY_ID)',
+          lastUpdated: '09:00 SGT (MAS Certified Benchmark)',
+        };
+      }
+    }
+  } catch (err) {
+    console.debug('Serverless /api/sora fetch note: Falling back to direct MAS or baseline', err);
+  }
+
+  // 2. Direct MAS open datastore fallback
+  const masApiUrl =
+    'https://eservices.mas.gov.sg/api/action/datastore/search.json?resource_id=9a0bf149-308d-4bd2-832d-76c8e6cad4be&limit=15&sort=end_of_day%20desc';
 
   try {
     const controller = new AbortController();
@@ -189,8 +231,7 @@ export async function fetchMasSoraRates(): Promise<{
       }
     }
   } catch (err) {
-    // Graceful fallback for sandboxed/offline/CORS environments
-    console.debug('MAS Live API direct fetch note: Falling back to verified MAS baseline dataset', err);
+    console.debug('Direct MAS fetch note: Falling back to verified MAS baseline dataset', err);
   }
 
   return {
